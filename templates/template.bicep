@@ -13,15 +13,8 @@ var roles = {
 var suffix = substring(uniqueString(resourceGroup().id, deployment().name), 0, 5)
 
 // Microsoft Purview account used for the Epicor governance demo.
-resource purviewAccount 'Microsoft.Purview/accounts@2021-07-01' = {
-  name: 'pvdemo${suffix}-pv'
-  location: location
-  identity: {
-    type: 'SystemAssigned'
-  }
-  tags: {
-    resourceByPass: 'allowed'
-  }
+resource purviewAccount 'Microsoft.Purview/accounts@2021-07-01' existing = {
+  name: 'pvdemopkua7-pv'
 }
 
 // User-assigned managed identity used by the post-deployment configuration script.
