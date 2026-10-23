@@ -254,13 +254,22 @@ Start-Sleep -Seconds 30
 
 Write-Host 'Downloading and uploading sample data to ADLS Gen2...'
 $containerName = 'bing'
-$storageAccount = Get-AzStorageAccount -ResourceGroupName $resourceGroupName -Name $storageAccountName
-$storageContext = $storageAccount.Context
+#$storageAccount = Get-AzStorageAccount -ResourceGroupName $resourceGroupName -Name $storageAccountName
+#$storageContext = $storageAccount.Context
 
-$existingContainer = Get-AzStorageContainer -Name $containerName -Context $storageContext -ErrorAction SilentlyContinue
-if (-not $existingContainer) {
-    New-AzStorageContainer -Name $containerName -Context $storageContext -Permission Off | Out-Null
-}
+$storageAccount = Get-AzStorageAccount `
+    -ResourceGroupName $resourceGroupName `
+    -Name $storageAccountName
+
+$storageContext = New-AzStorageContext `
+    -StorageAccountName $storageAccountName `
+    -UseConnectedAccount
+
+
+#$existingContainer = Get-AzStorageContainer -Name $containerName -Context $storageContext -ErrorAction SilentlyContinue
+#if (-not $existingContainer) {
+#    New-AzStorageContainer -Name $containerName -Context $storageContext -Permission Off | Out-Null
+#}
 
 $workFolder = Join-Path $PWD 'bing-sample'
 $zipPath = Join-Path $PWD 'bing-sample.zip'
