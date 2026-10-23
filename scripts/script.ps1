@@ -1,56 +1,52 @@
 param(
+    [Parameter(Mandatory = $true)]
     [string]$accountName,
-    [string]$adfName,
-    [string]$adfPipelineName,
-    [string]$adfPrincipalId,
+
+    [Parameter(Mandatory = $true)]
     [string]$location,
+
+    [Parameter(Mandatory = $true)]
     [string]$objectId,
+
+    [Parameter(Mandatory = $true)]
     [string]$resourceGroupName,
-    [string]$sqlDatabaseName,
-    [string]$sqlSecretName,
-    [string]$sqlServerAdminLogin,
-    [string]$sqlServerName,
+
+    [Parameter(Mandatory = $true)]
     [string]$storageAccountName,
-    [string]$subscriptionId,
-    [string]$vaultUri,
-    [string]$fabricCapacityName
+
+    [Parameter(Mandatory = $true)]
+    [string]$subscriptionId
 )
 
-# Alternative implementation using REST APIs instead of PowerShell modules to avoid version conflicts
-Write-Host "Purview Demo Deployment Script - REST API Version"
-Write-Host "This version uses REST APIs to avoid Azure PowerShell module conflicts"
+$ErrorActionPreference = 'Stop'
+
+Write-Host 'Purview ADLS Demo Deployment Script'
+Write-Host 'Configures Purview collections, ADLS sample data, an ADLS managed-identity scan, and a glossary.'
 
 try {
-    # Set security protocol
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-    # Install only essential modules
-    Write-Host "Installing minimal required Azure PowerShell modules..."
+    Write-Host 'Installing required Azure PowerShell modules...'
     Install-Module -Name Az.Accounts -Force -AllowClobber -Scope CurrentUser -Repository PSGallery
     Install-Module -Name Az.Storage -Force -AllowClobber -Scope CurrentUser -Repository PSGallery
-    Install-Module -Name Az.DataFactory -Force -AllowClobber -Scope CurrentUser -Repository PSGallery
-    
+
     Import-Module -Name Az.Accounts -Force
     Import-Module -Name Az.Storage -Force
-    Import-Module -Name Az.DataFactory -Force
-    
-    Write-Host "Essential modules loaded successfully."
+    Write-Host 'Required modules loaded successfully.'
 }
 catch {
-    Write-Error "Failed to load essential modules: $($_.Exception.Message)"
+    Write-Error "Failed to load required modules: $($_.Exception.Message)"
     throw
 }
 
-# Variables
 $pv_endpoint = "https://${accountName}.purview.azure.com"
 
-# Extract suffix from account name (e.g., "pvdemonwdaq-pv" -> "nwdaq")
-$suffix = if ($accountName -match 'pvdemo([a-z0-9]+)-pv') { $matches[1] } else { "" }
-
-# Function to get access token for Azure Management API
 function Get-AzureManagementToken {
     try {
-        $response = Invoke-RestMethod -Uri 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F' -Headers @{Metadata="true"} -Method GET
+        $response = Invoke-RestMethod `
+            -Uri 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F' `
+            -Headers @{ Metadata = 'true' } `
+            -Method GET
         return $response.access_token
     }
     catch {
@@ -59,7 +55,14 @@ function Get-AzureManagementToken {
     }
 }
 
-# Function to add root collection admin using REST API
+function Get-PurviewToken {
+    $response = Invoke-RestMethod `
+        -Uri 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fpurview.azure.net%2F' `
+        -Headers @{ Metadata = 'true' } `
+        -Method GET
+    return $response.access_token
+}
+
 function Add-PurviewRootCollectionAdmin {
     param(
         [string]$subscriptionId,
@@ -68,336 +71,221 @@ function Add-PurviewRootCollectionAdmin {
         [string]$objectId,
         [string]$accessToken
     )
-    
-    try {
-        $uri = "https://management.azure.com/subscriptions/${subscriptionId}/resourceGroups/${resourceGroupName}/providers/Microsoft.Purview/accounts/${accountName}/addRootCollectionAdmin?api-version=2021-07-01"
-        
-        $body = @{
-            objectId = $objectId
-        } | ConvertTo-Json
-        
-        $headers = @{
-            'Authorization' = "Bearer $accessToken"
-            'Content-Type' = 'application/json'
-        }
-        
-        Write-Host "Making REST API call to add root collection admin..."
-        Write-Host "URI: $uri"
-        Write-Host "Object ID: $objectId"
-        
-        $response = Invoke-RestMethod -Uri $uri -Method POST -Body $body -Headers $headers
-        Write-Host "Successfully added root collection admin via REST API"
-        return $response
+
+    $uri = "https://management.azure.com/subscriptions/${subscriptionId}/resourceGroups/${resourceGroupName}/providers/Microsoft.Purview/accounts/${accountName}/addRootCollectionAdmin?api-version=2021-07-01"
+    $body = @{ objectId = $objectId } | ConvertTo-Json
+    $headers = @{
+        Authorization = "Bearer $accessToken"
+        'Content-Type' = 'application/json'
     }
-    catch {
-        Write-Error "Failed to add root collection admin via REST API: $($_.Exception.Message)"
-        if ($_.Exception.Response) {
-            $errorResponse = $_.Exception.Response.GetResponseStream()
-            $reader = New-Object System.IO.StreamReader($errorResponse)
-            $errorContent = $reader.ReadToEnd()
-            Write-Host "Error response: $errorContent"
-        }
-        throw
-    }
+
+    Write-Host 'Adding the deployment managed identity as Purview root collection administrator...'
+    Invoke-RestMethod -Uri $uri -Method POST -Body $body -Headers $headers | Out-Null
 }
 
-function invokeWeb([string]$uri, [string]$access_token, [string]$method, [string]$body) { 
+function Invoke-PurviewWeb {
+    param(
+        [string]$uri,
+        [string]$accessToken,
+        [string]$method,
+        [AllowNull()][string]$body
+    )
+
     $retryCount = 0
-    $response = $null
-    while (($null -eq $response) -and ($retryCount -lt 3)) {
+    while ($retryCount -lt 3) {
         try {
-            $response = Invoke-WebRequest -Uri $uri -Headers @{Authorization="Bearer $access_token"} -ContentType "application/json" -Method $method -Body $body
+            $parameters = @{
+                Uri = $uri
+                Headers = @{ Authorization = "Bearer $accessToken" }
+                ContentType = 'application/json'
+                Method = $method
+            }
+            if ($null -ne $body) {
+                $parameters.Body = $body
+            }
+
+            $response = Invoke-WebRequest @parameters
+            if ([string]::IsNullOrWhiteSpace($response.Content)) {
+                return $null
+            }
+            return $response.Content | ConvertFrom-Json -Depth 20
         }
         catch {
-            Write-Host "[Error]"
-            Write-Host "Token: ${access_token}"
-            Write-Host "URI: ${uri}"
-            Write-Host "Method: ${method}"
-            Write-Host "Body: ${body}"
-            Write-Host "Response:" $_.Exception.Response
-            Write-Host "Exception:" $_.Exception
-            $retryCount += 1
-            $response = $null
-            Start-Sleep 3
+            $retryCount++
+            Write-Warning "Purview request failed, attempt ${retryCount} of 3: $($_.Exception.Message)"
+            if ($retryCount -ge 3) { throw }
+            Start-Sleep -Seconds 5
         }
     }
-    Return $response.Content | ConvertFrom-Json -Depth 10
 }
 
-# [GET] Metadata Policy
-function getMetadataPolicy([string]$access_token, [string]$collectionName) {
+function Get-MetadataPolicy {
+    param([string]$accessToken, [string]$collectionName)
     $uri = "${pv_endpoint}/policystore/collections/${collectionName}/metadataPolicy?api-version=2021-07-01"
-    $response = invokeWeb $uri $access_token "GET" $null
-    Return $response
+    return Invoke-PurviewWeb -uri $uri -accessToken $accessToken -method 'GET' -body $null
 }
 
-# Modify Metadata Policy
-function addRoleAssignment([object]$policy, [string]$principalId, [string]$roleName) {
-    Foreach ($attributeRule in $policy.properties.attributeRules) {
-        if (($attributeRule.name).StartsWith("purviewmetadatarole_builtin_${roleName}:")) {
-            Foreach ($conditionArray in $attributeRule.dnfCondition) {
-                Foreach($condition in $conditionArray) {
-                    if ($condition.attributeName -eq "principal.microsoft.id") {
+function Add-RoleAssignmentToPolicy {
+    param([object]$policy, [string]$principalId, [string]$roleName)
+
+    foreach ($attributeRule in $policy.properties.attributeRules) {
+        if ($attributeRule.name.StartsWith("purviewmetadatarole_builtin_${roleName}:")) {
+            foreach ($conditionArray in $attributeRule.dnfCondition) {
+                foreach ($condition in $conditionArray) {
+                    if ($condition.attributeName -eq 'principal.microsoft.id' -and
+                        $condition.attributeValueIncludedIn -notcontains $principalId) {
                         $condition.attributeValueIncludedIn += $principalId
                     }
-                 }
+                }
             }
         }
     }
 }
 
-# [PUT] Metadata Policy
-function putMetadataPolicy([string]$access_token, [string]$metadataPolicyId, [object]$payload) {
+function Set-MetadataPolicy {
+    param([string]$accessToken, [string]$metadataPolicyId, [object]$payload)
     $uri = "${pv_endpoint}/policystore/metadataPolicies/${metadataPolicyId}?api-version=2021-07-01"
-    $body = ($payload | ConvertTo-Json -Depth 10)
-    $response = invokeWeb $uri $access_token "PUT" $body
-    Return $response
+    $body = $payload | ConvertTo-Json -Depth 20
+    return Invoke-PurviewWeb -uri $uri -accessToken $accessToken -method 'PUT' -body $body
 }
 
-# [PUT] Key Vault
-function putVault([string]$access_token, [hashtable]$payload) {
-    $randomId = -join (((48..57)+(65..90)+(97..122)) * 80 |Get-Random -Count 3 |ForEach-Object{[char]$_})
-    $keyVaultName = "keyVault-${randomId}"
-    $uri = "${pv_endpoint}/scan/azureKeyVaults/${keyVaultName}"
-    $body = ($payload | ConvertTo-Json)
-    $response = invokeWeb $uri $access_token "PUT" $body
-    Return $response
-}
+function New-PurviewCollection {
+    param([string]$accessToken, [string]$friendlyName, [string]$parentCollection)
 
-# [PUT] Credential
-function putCredential([string]$access_token, [hashtable]$payload) {
-    $credentialName = $payload.name
-    $uri = "${pv_endpoint}/proxy/credentials/${credentialName}?api-version=2020-12-01-preview"
-    $body = ($payload | ConvertTo-Json -Depth 9)
-    $response = invokeWeb $uri $access_token "PUT" $body
-    Return $response
-}
-
-# [PUT] Scan
-function putScan([string]$access_token, [string]$dataSourceName, [hashtable]$payload) {
-    $scanName = $payload.name
-    $uri = "${pv_endpoint}/scan/datasources/${dataSourceName}/scans/${scanName}"
-    $body = ($payload | ConvertTo-Json -Depth 9)
-    $response = invokeWeb $uri $access_token "PUT" $body
-    Return $response
-}
-
-# [PUT] Run Scan
-function runScan([string]$access_token, [string]$datasourceName, [string]$scanName) {
-    $uri = "${pv_endpoint}/scan/datasources/${datasourceName}/scans/${scanName}/run?api-version=2018-12-01-preview"
-    $payload = @{ scanLevel = "Full" }
-    $body = ($payload | ConvertTo-Json)
-    $response = invokeWeb $uri $access_token "POST" $body
-    Return $response
-}
-
-# [POST] Create Glossary
-function createGlossary([string]$access_token) {
-    $uri = "${pv_endpoint}/catalog/api/atlas/v2/glossary"
-    $payload = @{
-        name = "Glossary"
-        qualifiedName = "Glossary"
-    }
-    $body = ($payload | ConvertTo-Json -Depth 4)
-    $response = invokeWeb $uri $access_token "POST" $body
-    Return $response
-}
-
-# [POST] Import Glossary Terms
-function importGlossaryTerms([string]$access_token, [string]$glossaryGuid, [string]$glossaryTermsTemplateUri) {
-    $glossaryTermsFilename = "import-terms-sample.csv"
-    Invoke-RestMethod -Uri $glossaryTermsTemplateUri -OutFile $glossaryTermsFilename
-    $glossaryImportUri = "${pv_endpoint}/catalog/api/atlas/v2/glossary/${glossaryGuid}/terms/import?includeTermHierarchy=true&api-version=2021-05-01-preview"
-    $fieldName = 'file'
-    $filePath = (Get-Item $glossaryTermsFilename).FullName
-    Add-Type -AssemblyName System.Net.Http
-    $client = New-Object System.Net.Http.HttpClient
-    $content = New-Object System.Net.Http.MultipartFormDataContent
-    $fileStream = [System.IO.File]::OpenRead($filePath)
-    $fileContent = New-Object System.Net.Http.StreamContent($fileStream)
-    $content.Add($fileContent, $fieldName, $glossaryTermsFilename)
-    $client.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $access_token)
-    $result = $client.PostAsync($glossaryImportUri, $content).Result
-    return $result
-}
-
-# [PUT] Collection
-function putCollection([string]$access_token, [string]$collectionFriendlyName, [string]$parentCollection) {
-    $collectionName = -join ((97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_})
+    $collectionName = -join ((97..122) | Get-Random -Count 8 | ForEach-Object { [char]$_ })
     $uri = "${pv_endpoint}/account/collections/${collectionName}?api-version=2019-11-01-preview"
     $payload = @{
-        "name" = $collectionName
-        "parentCollection"= @{
-            "type" = "CollectionReference"
-            "referenceName" = $parentCollection
-        }
-        "friendlyName" = $collectionFriendlyName
-    }
-    $body = ($payload | ConvertTo-Json -Depth 10)
-    $response = invokeWeb $uri $access_token "PUT" $body
-    Return $response
-}
-
-# [PUT] Data Source
-function putSource([string]$access_token, [hashtable]$payload) {
-    $dataSourceName = $payload.name
-    $uri = "${pv_endpoint}/scan/datasources/${dataSourceName}?api-version=2018-12-01-preview"
-    $body = ($payload | ConvertTo-Json)
-    $response = invokeWeb $uri $access_token "PUT" $body
-    Return $response
-}
-
-# Verify Azure context
-Write-Host "Verifying Azure authentication context..."
-try {
-    $context = Get-AzContext
-    if (-not $context) {
-        Write-Host "No Azure context found. Attempting to authenticate using managed identity..."
-        Connect-AzAccount -Identity
-        $context = Get-AzContext
-    }
-    
-    Write-Host "Azure context verified:"
-    Write-Host "  Subscription: $($context.Subscription.Name) ($($context.Subscription.Id))"
-    Write-Host "  Account: $($context.Account.Id)"
-}
-catch {
-    Write-Error "Failed to establish Azure context: $($_.Exception.Message)"
-    throw
-}
-
-# Add UAMI to Root Collection Admin using REST API
-Write-Host "Adding User Assigned Managed Identity to Root Collection Admin using REST API..."
-try {
-    $managementToken = Get-AzureManagementToken
-    Add-PurviewRootCollectionAdmin -subscriptionId $subscriptionId -resourceGroupName $resourceGroupName -accountName $accountName -objectId $objectId -accessToken $managementToken
-}
-catch {
-    Write-Error "Failed to add root collection admin: $($_.Exception.Message)"
-    throw
-}
-
-# Get Access Token for Purview
-$response = Invoke-WebRequest -Uri 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fpurview.azure.net%2F' -Headers @{Metadata="true"}
-$content = $response.Content | ConvertFrom-Json
-$access_token = $content.access_token
-
-# Continue with the rest of the script (same as original)
-Write-Host "Continuing with Purview configuration..."
-
-# 1. Update Root Collection Policy (Add Current User to Built-In Purview Roles)
-$rootCollectionPolicy = getMetadataPolicy $access_token $accountName
-addRoleAssignment $rootCollectionPolicy $objectId "data-curator"
-addRoleAssignment $rootCollectionPolicy $objectId "data-source-administrator"
-addRoleAssignment $rootCollectionPolicy $adfPrincipalId "data-curator"
-$updatedPolicy = putMetadataPolicy $access_token $rootCollectionPolicy.id $rootCollectionPolicy
-
-# 2. Refresh Access Token
-$response = Invoke-WebRequest -Uri 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fpurview.azure.net%2F' -Headers @{Metadata="true"}
-$content = $response.Content | ConvertFrom-Json
-$access_token = $content.access_token
-
-# 3. Create a Key Vault Connection
-$vaultPayload = @{
-    properties = @{
-        baseUrl = $vaultUri
-        description = ""
-    }
-}
-$vault = putVault $access_token $vaultPayload
-
-# 4. Create a Credential
-$credentialPayload = @{
-    name = "sql-cred"
-    properties = @{
-        description = ""
-        type = "SqlAuth"
-        typeProperties = @{
-            password = @{
-                secretName = $sqlSecretName
-                secretVersion = ""
-                store = @{
-                    referenceName = $vault.name
-                    type = "LinkedServiceReference"
-                }
-                type = "AzureKeyVaultSecret"
-            }
-            user = $sqlServerAdminLogin
-        }
-    }
-    type = "Microsoft.Purview/accounts/credentials"
-}
-$cred = putCredential $access_token $credentialPayload
-
-# 5. Create Collections (Sales and Marketing)
-$collectionSales = putCollection $access_token "Sales" $accountName
-$collectionMarketing = putCollection $access_token "Marketing" $accountName
-$collectionSalesName = $collectionSales.name
-$collectionMarketingName = $collectionMarketing.name
-Start-Sleep 30
-
-# 6. Create a Source (Azure SQL Database)
-$sourceSqlPayload = @{
-    id = "datasources/AzureSqlDatabase"
-    kind = "AzureSqlDatabase"
-    name = "AzureSqlDatabase"
-    properties = @{
-        collection = @{
-            referenceName = $collectionSalesName
+        name = $collectionName
+        parentCollection = @{
             type = 'CollectionReference'
+            referenceName = $parentCollection
         }
-        location = $location
-        resourceGroup = $resourceGroupName
-        resourceName = $sqlServerName
-        serverEndpoint = "${sqlServerName}.database.windows.net"
-        subscriptionId = $subscriptionId
+        friendlyName = $friendlyName
+    }
+    return Invoke-PurviewWeb -uri $uri -accessToken $accessToken -method 'PUT' -body ($payload | ConvertTo-Json -Depth 10)
+}
+
+function Set-PurviewSource {
+    param([string]$accessToken, [hashtable]$payload)
+    $uri = "${pv_endpoint}/scan/datasources/$($payload.name)?api-version=2018-12-01-preview"
+    return Invoke-PurviewWeb -uri $uri -accessToken $accessToken -method 'PUT' -body ($payload | ConvertTo-Json -Depth 10)
+}
+
+function Set-PurviewScan {
+    param([string]$accessToken, [string]$dataSourceName, [hashtable]$payload)
+    $uri = "${pv_endpoint}/scan/datasources/${dataSourceName}/scans/$($payload.name)?api-version=2018-12-01-preview"
+    return Invoke-PurviewWeb -uri $uri -accessToken $accessToken -method 'PUT' -body ($payload | ConvertTo-Json -Depth 10)
+}
+
+function Start-PurviewScan {
+    param([string]$accessToken, [string]$dataSourceName, [string]$scanName)
+    $uri = "${pv_endpoint}/scan/datasources/${dataSourceName}/scans/${scanName}/run?api-version=2018-12-01-preview"
+    $body = @{ scanLevel = 'Full' } | ConvertTo-Json
+    return Invoke-PurviewWeb -uri $uri -accessToken $accessToken -method 'POST' -body $body
+}
+
+function New-PurviewGlossary {
+    param([string]$accessToken)
+    $uri = "${pv_endpoint}/catalog/api/atlas/v2/glossary"
+    $payload = @{ name = 'Epicor Demo Glossary'; qualifiedName = 'Epicor Demo Glossary' }
+    return Invoke-PurviewWeb -uri $uri -accessToken $accessToken -method 'POST' -body ($payload | ConvertTo-Json)
+}
+
+function Import-PurviewGlossaryTerms {
+    param([string]$accessToken, [string]$glossaryGuid, [string]$templateUri)
+
+    $filename = Join-Path $PWD 'import-terms-sample.csv'
+    Invoke-RestMethod -Uri $templateUri -OutFile $filename
+    $uri = "${pv_endpoint}/catalog/api/atlas/v2/glossary/${glossaryGuid}/terms/import?includeTermHierarchy=true&api-version=2021-05-01-preview"
+
+    Add-Type -AssemblyName System.Net.Http
+    $client = New-Object System.Net.Http.HttpClient
+    $client.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $accessToken)
+    $multipart = New-Object System.Net.Http.MultipartFormDataContent
+    $stream = [System.IO.File]::OpenRead($filename)
+    $fileContent = New-Object System.Net.Http.StreamContent($stream)
+    $multipart.Add($fileContent, 'file', 'import-terms-sample.csv')
+
+    try {
+        $result = $client.PostAsync($uri, $multipart).Result
+        if (-not $result.IsSuccessStatusCode) {
+            throw "Glossary import failed with HTTP status $($result.StatusCode)."
+        }
+    }
+    finally {
+        $stream.Dispose()
+        $multipart.Dispose()
+        $client.Dispose()
     }
 }
-$source1 = putSource $access_token $sourceSqlPayload
 
-# 7. Create a Scan Configuration
-$randomId = -join (((48..57)+(65..90)+(97..122)) * 80 |Get-Random -Count 3 |ForEach-Object{[char]$_})
-$scanName = "Scan-${randomId}"
-$scanSqlPayload = @{
-    kind = "AzureSqlDatabaseCredential"
-    name = $scanName
-    properties = @{
-        databaseName = $sqlDatabaseName
-        scanRulesetName = "AzureSqlDatabase"
-        scanRulesetType = "System"
-        serverEndpoint = "${sqlServerName}.database.windows.net"
-        credential = @{
-            credentialType = "SqlAuth"
-            referenceName = $credentialPayload.name
-        }
-        collection = @{
-            type = "CollectionReference"
-            referenceName = $collectionSalesName
-        }
-    }
+Write-Host 'Verifying Azure authentication context...'
+$context = Get-AzContext
+if (-not $context) {
+    Connect-AzAccount -Identity | Out-Null
+    $context = Get-AzContext
 }
-$scan1 = putScan $access_token $sourceSqlPayload.name $scanSqlPayload
+Write-Host "Authenticated subscription: $($context.Subscription.Id)"
 
-# 8. Trigger Scan
-$run1 = runScan $access_token $sourceSqlPayload.name $scanSqlPayload.name
+$managementToken = Get-AzureManagementToken
+Add-PurviewRootCollectionAdmin `
+    -subscriptionId $subscriptionId `
+    -resourceGroupName $resourceGroupName `
+    -accountName $accountName `
+    -objectId $objectId `
+    -accessToken $managementToken
 
-# 9. Load Storage Account with Sample Data
-$containerName = "bing"
+$accessToken = Get-PurviewToken
+
+Write-Host 'Assigning managed identity Purview data curator and data source administrator roles...'
+$rootPolicy = Get-MetadataPolicy -accessToken $accessToken -collectionName $accountName
+Add-RoleAssignmentToPolicy -policy $rootPolicy -principalId $objectId -roleName 'data-curator'
+Add-RoleAssignmentToPolicy -policy $rootPolicy -principalId $objectId -roleName 'data-source-administrator'
+Set-MetadataPolicy -accessToken $accessToken -metadataPolicyId $rootPolicy.id -payload $rootPolicy | Out-Null
+
+$accessToken = Get-PurviewToken
+
+Write-Host 'Creating demo collections...'
+$collectionData = New-PurviewCollection -accessToken $accessToken -friendlyName 'Epicor Demo Data' -parentCollection $accountName
+$collectionGovernance = New-PurviewCollection -accessToken $accessToken -friendlyName 'Epicor Governance' -parentCollection $accountName
+$collectionDataName = $collectionData.name
+Write-Host "Created collections: $($collectionData.friendlyName), $($collectionGovernance.friendlyName)"
+Start-Sleep -Seconds 30
+
+Write-Host 'Downloading and uploading sample data to ADLS Gen2...'
+$containerName = 'bing'
 $storageAccount = Get-AzStorageAccount -ResourceGroupName $resourceGroupName -Name $storageAccountName
-$RepoUrl = 'https://api.github.com/repos/microsoft/BingCoronavirusQuerySet/zipball/master'
-Invoke-RestMethod -Uri $RepoUrl -OutFile "${containerName}.zip"
-Expand-Archive -Path "${containerName}.zip"
-Set-Location -Path "${containerName}"
-Get-ChildItem -File -Recurse | Set-AzStorageBlobContent -Container ${containerName} -Context $storageAccount.Context
+$storageContext = $storageAccount.Context
 
-# 10. Create a Source (ADLS Gen2)
-$sourceAdlsPayload = @{
-    id = "datasources/AzureDataLakeStorage"
-    kind = "AdlsGen2"
-    name = "AzureDataLakeStorage"
+$existingContainer = Get-AzStorageContainer -Name $containerName -Context $storageContext -ErrorAction SilentlyContinue
+if (-not $existingContainer) {
+    New-AzStorageContainer -Name $containerName -Context $storageContext -Permission Off | Out-Null
+}
+
+$workFolder = Join-Path $PWD 'bing-sample'
+$zipPath = Join-Path $PWD 'bing-sample.zip'
+if (Test-Path $workFolder) { Remove-Item -Path $workFolder -Recurse -Force }
+if (Test-Path $zipPath) { Remove-Item -Path $zipPath -Force }
+
+$repoUrl = 'https://api.github.com/repos/microsoft/BingCoronavirusQuerySet/zipball/master'
+Invoke-RestMethod -Uri $repoUrl -OutFile $zipPath
+Expand-Archive -Path $zipPath -DestinationPath $workFolder -Force
+
+$sampleFiles = Get-ChildItem -Path $workFolder -File -Recurse
+foreach ($file in $sampleFiles) {
+    $blobName = $file.FullName.Substring($workFolder.Length).TrimStart([char[]]'\/')
+    Set-AzStorageBlobContent -File $file.FullName -Container $containerName -Blob $blobName -Context $storageContext -Force | Out-Null
+}
+Write-Host "Uploaded $($sampleFiles.Count) sample files to container '${containerName}'."
+
+Write-Host 'Registering ADLS Gen2 source in Purview...'
+$sourcePayload = @{
+    id = 'datasources/AzureDataLakeStorage'
+    kind = 'AdlsGen2'
+    name = 'AzureDataLakeStorage'
     properties = @{
         collection = @{
-            referenceName = $collectionMarketingName
+            referenceName = $collectionDataName
             type = 'CollectionReference'
         }
         location = $location
@@ -407,185 +295,44 @@ $sourceAdlsPayload = @{
         subscriptionId = $subscriptionId
     }
 }
-$source2 = putSource $access_token $sourceAdlsPayload
+Set-PurviewSource -accessToken $accessToken -payload $sourcePayload | Out-Null
 
-# 11. Create a Scan Configuration
-$randomId = -join (((48..57)+(65..90)+(97..122)) * 80 |Get-Random -Count 3 |ForEach-Object{[char]$_})
+Write-Host 'Creating managed-identity ADLS scan...'
+$randomId = -join (((48..57) + (65..90) + (97..122)) | Get-Random -Count 5 | ForEach-Object { [char]$_ })
 $scanName = "Scan-${randomId}"
-$scanAdlsPayload = @{
-    kind = "AdlsGen2Msi"
+$scanPayload = @{
+    kind = 'AdlsGen2Msi'
     name = $scanName
     properties = @{
-        scanRulesetName = "AdlsGen2"
-        scanRulesetType = "System"
+        scanRulesetName = 'AdlsGen2'
+        scanRulesetType = 'System'
         collection = @{
-            type = "CollectionReference"
-            referenceName = $collectionMarketingName
+            type = 'CollectionReference'
+            referenceName = $collectionDataName
         }
     }
 }
-$scacn2 = putScan $access_token $sourceAdlsPayload.name $scanAdlsPayload
+Set-PurviewScan -accessToken $accessToken -dataSourceName $sourcePayload.name -payload $scanPayload | Out-Null
 
-# 12. Trigger Scan
-$run2 = runScan $access_token $sourceAdlsPayload.name $scanAdlsPayload.name
+Write-Host "Starting scan '${scanName}'..."
+Start-PurviewScan -accessToken $accessToken -dataSourceName $sourcePayload.name -scanName $scanName | Out-Null
 
-# 13. Run ADF Pipeline
-Invoke-AzDataFactoryV2Pipeline -ResourceGroupName $resourceGroupName -DataFactoryName $adfName -PipelineName $adfPipelineName
-
-# 14. Populate Glossary
-$glossaryGuid = (createGlossary $access_token).guid
-$glossaryTermsTemplateUri = 'https://raw.githubusercontent.com/tayganr/purviewlab/main/assets/import-terms-sample.csv'
-importGlossaryTerms $access_token $glossaryGuid $glossaryTermsTemplateUri
-
-# 15. Create Microsoft Fabric Workspace and Lakehouse
-Write-Host "Setting up Microsoft Fabric workspace and lakehouse..."
+Write-Host 'Creating and populating the demo glossary...'
 try {
-    # IMPORTANT: Fabric API requires user credentials or service principal with Fabric Admin role
-    # Managed identities cannot be added as Fabric capacity admins (only UPNs are supported)
-    # The user who deployed this template is already a Fabric capacity admin
-    
-    # Try to get Fabric access token from managed identity (will likely fail with 401)
-    # Alternative: Use user delegation token if provided via environment variable
-    if ($env:FABRIC_USER_TOKEN) {
-        Write-Host "Using provided user access token for Fabric operations..."
-        $fabricToken = $env:FABRIC_USER_TOKEN
-    }
-    else {
-        Write-Host "Attempting to get Fabric API token via managed identity..."
-        $fabricTokenResponse = Invoke-RestMethod -Uri 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fapi.fabric.microsoft.com%2F' -Headers @{Metadata="true"} -Method GET
-        $fabricToken = $fabricTokenResponse.access_token
-    }
-    
-    $managementToken = Get-AzureManagementToken
-    
-    # Create Fabric Workspace
-    $workspaceName = "PurviewDemoWorkspace-${accountName}"
-    $fabricWorkspacePayload = @{
-        displayName = $workspaceName
-        description = "Purview Demo Fabric Workspace"
-        capacityId = "/subscriptions/${subscriptionId}/resourceGroups/${resourceGroupName}/providers/Microsoft.Fabric/capacities/${fabricCapacityName}"
-    } | ConvertTo-Json
-    
-    Write-Host "Creating Fabric workspace: $workspaceName"
-    $workspaceUri = "https://api.fabric.microsoft.com/v1/workspaces"
-    $workspace = Invoke-RestMethod -Uri $workspaceUri -Method POST -Body $fabricWorkspacePayload -Headers @{
-        'Authorization' = "Bearer $fabricToken"
-        'Content-Type' = 'application/json'
-    }
-    $workspaceId = $workspace.id
-    Write-Host "Fabric workspace created: $workspaceId"
-    
-    # Wait for workspace to be ready
-    Start-Sleep -Seconds 30
-    
-    # Create Lakehouse in Fabric Workspace
-    $lakehouseName = "SalesLakehouse"
-    $lakehousePayload = @{
-        displayName = $lakehouseName
-        description = "Lakehouse for SQL data from AdventureWorks"
-    } | ConvertTo-Json
-    
-    Write-Host "Creating Lakehouse: $lakehouseName"
-    $lakehouseUri = "https://api.fabric.microsoft.com/v1/workspaces/${workspaceId}/lakehouses"
-    $lakehouse = Invoke-RestMethod -Uri $lakehouseUri -Method POST -Body $lakehousePayload -Headers @{
-        'Authorization' = "Bearer $fabricToken"
-        'Content-Type' = 'application/json'
-    }
-    $lakehouseId = $lakehouse.id
-    Write-Host "Lakehouse created: $lakehouseId"
-    
-    # Create ADF Pipeline to copy SQL data to Lakehouse
-    Write-Host "Creating Data Factory pipeline to copy SQL data to Lakehouse..."
-    
-    # Get the Lakehouse ABFS path (OneLake path)
-    $lakehouseAbfsPath = "abfss://${workspaceId}@onelake.dfs.fabric.microsoft.com/${lakehouseId}/Tables"
-    
-    # Create Lakehouse Linked Service in ADF
-    $lakehouseLinkedService = @{
-        name = "FabricLakehouseLinkedService"
-        properties = @{
-            type = "AzureBlobFS"
-            typeProperties = @{
-                url = "https://onelake.dfs.fabric.microsoft.com"
-            }
-            annotations = @()
-        }
-    }
-    
-    # Note: Actual Fabric integration requires Power BI REST API and proper authentication
-    # This is a placeholder for the full implementation
-    Write-Host "Fabric workspace and lakehouse setup initiated. Manual configuration may be required for:"
-    Write-Host "  1. Data Factory pipeline to Lakehouse connection"
-    Write-Host "  2. Power BI report creation"
-    Write-Host "  3. Purview scanning of Fabric workspace"
-    Write-Host ""
-    Write-Host "Fabric Workspace ID: $workspaceId"
-    Write-Host "Lakehouse ID: $lakehouseId"
-    Write-Host "OneLake Path: $lakehouseAbfsPath"
+    $glossary = New-PurviewGlossary -accessToken $accessToken
+    $termsUri = 'https://raw.githubusercontent.com/tayganr/purviewlab/main/assets/import-terms-sample.csv'
+    Import-PurviewGlossaryTerms -accessToken $accessToken -glossaryGuid $glossary.guid -templateUri $termsUri
+    Write-Host 'Glossary terms imported.'
 }
 catch {
-    $errorMessage = $_.Exception.Message
-    Write-Warning "Fabric setup encountered an issue: $errorMessage"
-    
-    # Check if it's an authorization error
-    if ($errorMessage -like "*401*" -or $errorMessage -like "*Unauthorized*") {
-        Write-Host ""
-        Write-Host "═══════════════════════════════════════════════════════════════════════════════"
-        Write-Host "  MANUAL FABRIC SETUP REQUIRED"
-        Write-Host "═══════════════════════════════════════════════════════════════════════════════"
-        Write-Host ""
-        Write-Host "The automated Fabric workspace creation failed because Fabric API requires"
-        Write-Host "user credentials with Fabric Admin permissions. Managed identities cannot"
-        Write-Host "create workspaces via the Fabric API."
-        Write-Host ""
-        Write-Host "Please complete the following manual steps to finish Fabric integration:"
-        Write-Host ""
-        Write-Host "1. Navigate to Microsoft Fabric Portal:"
-        Write-Host "   https://app.fabric.microsoft.com"
-        Write-Host ""
-        Write-Host "2. Create a new workspace:"
-        Write-Host "   - Click 'Workspaces' → '+ New workspace'"
-        Write-Host "   - Name: PurviewDemoWorkspace-${accountName}"
-        Write-Host "   - Description: Purview Demo Fabric Workspace"
-        Write-Host "   - Advanced Settings → License mode:"
-        Write-Host "     Select 'Fabric capacity'"
-        Write-Host "     Choose capacity: purviewdemofabric"
-        Write-Host ""
-        Write-Host "3. Create a Lakehouse in the workspace:"
-        Write-Host "   - In the workspace, click '+ New' → 'Lakehouse'"
-        Write-Host "   - Name: SalesLakehouse"
-        Write-Host "   - Description: Lakehouse for SQL data from AdventureWorks"
-        Write-Host ""
-        Write-Host "4. Set up Data Factory pipeline:"
-        Write-Host "   - Open Azure Data Factory: pvdemo${suffix}-adf"
-        Write-Host "   - Create a Copy Data pipeline to move data from SQL to Lakehouse"
-        Write-Host "   - Source: Azure SQL Database (pvdemo${suffix}-sqldb)"
-        Write-Host "   - Sink: Lakehouse OneLake endpoint"
-        Write-Host ""
-        Write-Host "5. Create Power BI report:"
-        Write-Host "   - In Fabric workspace, open SalesLakehouse"
-        Write-Host "   - Click 'New Power BI report'"
-        Write-Host "   - Build report on lakehouse tables"
-        Write-Host ""
-        Write-Host "6. Register Fabric workspace in Purview:"
-        Write-Host "   - Open Purview: ${accountName}.purview.azure.com"
-        Write-Host "   - Register the Fabric workspace as a data source"
-        Write-Host ""
-        Write-Host "For detailed instructions, see FABRIC_INTEGRATION.md in the repository."
-        Write-Host "═══════════════════════════════════════════════════════════════════════════════"
-        Write-Host ""
-    }
-    else {
-        Write-Host "Error details: $errorMessage"
-        Write-Host "You may need to manually configure Fabric workspace and lakehouse."
-    }
-    Write-Host "Continuing with rest of deployment..."
+    Write-Warning "Glossary setup did not complete: $($_.Exception.Message)"
+    Write-Warning 'The ADLS source and scan were still configured. You can import glossary terms manually later.'
 }
 
-Write-Host "Purview demo deployment completed successfully!"
-Write-Host ""
-Write-Host "Next Steps for Fabric Integration:"
-Write-Host "1. Navigate to Fabric workspace in Power BI portal"
-Write-Host "2. Create a dataflow/pipeline to copy SQL data to Lakehouse"
-Write-Host "3. Create a Power BI report on the Lakehouse data"
-Write-Host "4. Register Fabric workspace in Purview for governance"
+Write-Host ''
+Write-Host 'Purview ADLS demo deployment completed.'
+Write-Host "Purview account: ${accountName}"
+Write-Host "ADLS account: ${storageAccountName}"
+Write-Host "ADLS container: ${containerName}"
+Write-Host "Purview scan: ${scanName}"
+Write-Host 'The scan was submitted and may take several minutes to populate Data Map assets.'
