@@ -83,8 +83,29 @@ function Add-PurviewRootCollectionAdmin {
     }
 
     Write-Host 'Adding the deployment managed identity as Purview root collection administrator...'
-    Invoke-RestMethod -Uri $uri -Method POST -Body $body -Headers $headers | Out-Null
+
+    try {
+        Invoke-RestMethod `
+            -Uri $uri `
+            -Method POST `
+            -Body $body `
+            -Headers $headers | Out-Null
+
+        Write-Host 'Deployment managed identity added as Purview root collection administrator.'
+    }
+    catch {
+        $statusCode = [int]$_.Exception.Response.StatusCode
+
+        if ($statusCode -eq 409) {
+            Write-Warning 'The deployment managed identity is already a Purview root collection administrator. Continuing.'
+        }
+        else {
+            throw
+        }
+    }
 }
+
+
 
 function Invoke-PurviewWeb {
     param(
