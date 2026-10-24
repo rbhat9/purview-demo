@@ -98,7 +98,7 @@ resource configurationScript 'Microsoft.Resources/deploymentScripts@2023-08-01' 
   kind: 'AzurePowerShell'
   properties: {
     azPowerShellVersion: '11.0'
-    arguments: '-subscriptionId ${subscriptionId} -resourceGroupName ${resourceGroupName} -purviewResourceGroupName purview-rg -accountName ${purviewAccount.name} -objectId ${userAssignedIdentity.properties.principalId} -location ${location} -storageAccountName ${adls.name}'
+    arguments: '-subscriptionId ${subscriptionId} -resourceGroupName ${resourceGroupName} -purviewResourceGroupName purview-rg -rootCollectionName rsb-collection -accountName ${purviewAccount.name} -objectId ${userAssignedIdentity.properties.principalId} -location ${location} -storageAccountName ${adls.name}'
     primaryScriptUri: deploymentScriptUri
     forceUpdateTag: guid(resourceGroup().id, deployment().name, deploymentScriptUri)
     retentionInterval: 'PT4H'

@@ -12,6 +12,9 @@ param(
     [string]$purviewResourceGroupName,
 
     [Parameter(Mandatory = $true)]
+    [string]$rootCollectionName,
+
+    [Parameter(Mandatory = $true)]
     [string]$resourceGroupName,
 
     [Parameter(Mandatory = $true)]
@@ -262,7 +265,7 @@ Add-PurviewRootCollectionAdmin `
 $accessToken = Get-PurviewToken
 
 Write-Host 'Assigning managed identity Purview data curator and data source administrator roles...'
-$rootPolicy = Get-MetadataPolicy -accessToken $accessToken -collectionName $accountName
+$rootPolicy = Get-MetadataPolicy -accessToken $accessToken -collectionName $rootCollectionName
 Add-RoleAssignmentToPolicy -policy $rootPolicy -principalId $objectId -roleName 'data-curator'
 Add-RoleAssignmentToPolicy -policy $rootPolicy -principalId $objectId -roleName 'data-source-administrator'
 Set-MetadataPolicy -accessToken $accessToken -metadataPolicyId $rootPolicy.id -payload $rootPolicy | Out-Null
@@ -270,8 +273,8 @@ Set-MetadataPolicy -accessToken $accessToken -metadataPolicyId $rootPolicy.id -p
 $accessToken = Get-PurviewToken
 
 Write-Host 'Creating demo collections...'
-$collectionData = New-PurviewCollection -accessToken $accessToken -friendlyName 'Epicor Demo Data' -parentCollection $accountName
-$collectionGovernance = New-PurviewCollection -accessToken $accessToken -friendlyName 'Epicor Governance' -parentCollection $accountName
+$collectionData = New-PurviewCollection -accessToken $accessToken -friendlyName 'Epicor Demo Data' -parentCollection $rootCollectionName
+$collectionGovernance = New-PurviewCollection -accessToken $accessToken -friendlyName 'Epicor Governance' -parentCollection $rootCollectionName
 $collectionDataName = $collectionData.name
 Write-Host "Created collections: $($collectionData.friendlyName), $($collectionGovernance.friendlyName)"
 Start-Sleep -Seconds 30
