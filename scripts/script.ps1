@@ -9,6 +9,9 @@ param(
     [string]$objectId,
 
     [Parameter(Mandatory = $true)]
+    [string]$purviewResourceGroupName,
+
+    [Parameter(Mandatory = $true)]
     [string]$resourceGroupName,
 
     [Parameter(Mandatory = $true)]
@@ -230,7 +233,7 @@ Write-Host "Authenticated subscription: $($context.Subscription.Id)"
 $managementToken = Get-AzureManagementToken
 Add-PurviewRootCollectionAdmin `
     -subscriptionId $subscriptionId `
-    -resourceGroupName $resourceGroupName `
+    -resourceGroupName $purviewResourceGroupName `
     -accountName $accountName `
     -objectId $objectId `
     -accessToken $managementToken

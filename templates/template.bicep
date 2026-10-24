@@ -14,7 +14,8 @@ var suffix = substring(uniqueString(resourceGroup().id, deployment().name), 0, 5
 
 // Microsoft Purview account used for the Epicor governance demo.
 resource purviewAccount 'Microsoft.Purview/accounts@2021-07-01' existing = {
-  name: 'pvdemopkua7-pv'
+  name: 'rsb-purview' 
+  scope: resourceGroup(subscription().subscriptionId, 'purview-rg')
 }
 
 // User-assigned managed identity used by the post-deployment configuration script.
@@ -97,7 +98,7 @@ resource configurationScript 'Microsoft.Resources/deploymentScripts@2023-08-01' 
   kind: 'AzurePowerShell'
   properties: {
     azPowerShellVersion: '11.0'
-    arguments: '-subscriptionId ${subscriptionId} -resourceGroupName ${resourceGroupName} -accountName ${purviewAccount.name} -objectId ${userAssignedIdentity.properties.principalId} -location ${location} -storageAccountName ${adls.name}'
+    arguments: '-subscriptionId ${subscriptionId} -resourceGroupName ${resourceGroupName} -purviewResourceGroupName purview-rg -accountName ${purviewAccount.name} -objectId ${userAssignedIdentity.properties.principalId} -location ${location} -storageAccountName ${adls.name}'
     primaryScriptUri: deploymentScriptUri
     forceUpdateTag: guid(resourceGroup().id, deployment().name, deploymentScriptUri)
     retentionInterval: 'PT4H'
